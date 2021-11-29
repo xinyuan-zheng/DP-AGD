@@ -1,0 +1,377 @@
+---
+title: "DP-AGD"
+author: "Xinyuan"
+date: "11/24/2020"
+output: pdf_document
+---
+
+## Simulate a logistic dataset with known weights
+
+```{r}
+# sim_logistic <- function(sample_size = 1000,
+#                          beta_1 = 2,
+#                          beta_2 = 5){
+#   
+#   x1 <- rnorm(sample_size) + 0.1
+#   x2 <- runif(sample_size)
+#   eta <- beta_1*x1 + beta_2*x2
+#   pr <- 1 / (1 + exp(-eta))
+#   
+#   y <- rbinom(sample_size, 1, pr)
+#   return(data.frame(y, x1, x2))
+# }
+# 
+# sample <- sim_logistic()
+# 
+# X <- cbind(sample$x1, sample$x2)
+# y <- sample$y
+# 
+# glm(y ~ X-1, family = binomial(link = "logit"))$coef
+
+
+
+# load a simulated dataset
+setwd("~/Desktop/Courses/STAT5293_Privacy/agd")
+X <- as.matrix(read.csv("dataset/new_X.csv", header = F, sep =","))
+y <- as.matrix(read.csv("dataset/new_y.csv", header = F, sep =","))
+
+glm(y ~ X-1, family = binomial(link = "logit"))$coef
+```
+
+
+\newpage
+
+## Non-private logistic regression
+
+```{r}
+# logistic regression loss
+log_loss <- function(w, X, y, obj_clip = -1){
+  
+  obj <- log(1 + exp(X%*%w) ) - (y * X%*%w)
+  
+  if (obj_clip > 0){
+    obj[obj > obj_clip] <- obj_clip
+  }
+  
+  loss <- apply(obj, 2, sum)
+  return(as.vector(loss))
+}
+
+
+
+# logistic regression gradient
+log_grad <- function(w, X, y, grad_clip = -1){
+  
+  pred <- exp(X%*%w)/(1+exp(X%*%w))
+  z0 <- pred - y
+  
+  if (grad_clip > 0){
+    per_grad <- sweep(X, 1, z0, `*`)
+    grad_norm <- apply(per_grad, 1, norm, type = "2")
+    to_clip <- grad_norm > grad_clip
+    per_grad[to_clip,] <- (grad_clip * per_grad[to_clip,]) / grad_norm[to_clip]
+    grad <- colSums(per_grad)
+  } else {
+    grad <- t(X) %*% z0
+  }
+  
+  return(as.vector(grad))
+}
+
+
+
+# logistic regression accuracy
+log_test <- function(w, X, y){
+  
+  y[y < 0.5] <- -1
+  wx <- X %*% w
+  wx[wx == 0] <- 1
+  
+  sign <- y * wx
+  return(sum(sign > 0)/length(y))
+}
+```
+
+
+\newpage
+
+```{r}
+# training non-private logistic regression 
+train <- function(X, y, w, lr = 0.1, iter = 3000){
+  
+  w_hist <- l_hist <- a_hist <- list()
+  for (i in 1:iter){
+    w <- w - (log_grad(w, X, y)/length(y)) * lr
+    l <- log_loss(w, X, y)
+    a <- log_test(w, X, y)
+    w_hist <- append(w_hist, as.list(w))
+    l_hist <- append(l_hist, as.list(l))
+    a_hist <- append(a_hist, as.list(a))
+  }
+  
+  w_hist <- matrix(unlist(w_hist), ncol = 2, byrow = T)
+  l_hist <- unlist(l_hist)
+  a_hist <- unlist(a_hist)
+  
+  return(list(w_hist = w_hist, l_hist = l_hist, a_hist = a_hist))
+}
+
+
+
+# non-private gradient desecent tested on a simulated set with known weights
+iter <- 2000
+hist <- train(X, y, c(0, 0), 0.1, iter = iter)
+cat("estimated weights:", round(hist$w_hist[iter,], 3))
+
+par(mfrow=c(2,1), mai=c(.3, 1, .3, .7))
+plot(hist$w_hist[,1], ylim = c(0,2.5), type = "l", 
+     ylab = "weight 1", main = "non-private gradient desecent")
+abline(h = 2, col = 4)
+plot(hist$w_hist[,2], type = "l", ylab = "weight 2", ylim = c(0,5.5), xaxt='n')
+abline(h = 5, col = 4)
+plot(hist$l_hist, type = "l", ylab = "loss", main = "non-private gradient desecent")
+plot(hist$a_hist, type = "l", ylab = "accuracy", xaxt='n')
+```
+
+
+\newpage
+
+## For SVM
+
+```{r}
+# svm loss
+svm_loss <- function(w, X, y, obj_clip){
+  
+  obj <- 1 - y * (X%*%w)
+  obj[obj < 0] <- 0
+  
+  if (obj_clip > 0){
+    obj[obj > obj_clip] <- obj_clip
+  }
+  
+  loss <- apply(obj, 2, sum)
+  return(as.vecotr(loss))
+}
+
+
+
+# svm gradient
+svm_grad <- function(w, X, y, grad_clip){
+  
+  obj <- as.vector(1 - y * (X%*%w))
+  loc <- obj > 0
+  per_grad <- -1 * y[loc] * X[loc,]
+  
+  if (grad_clip > 0){
+    grad_norm <-  apply(per_grad, 1, norm, type = "2")
+    to_clip <- grad_norm > grad_clip
+    per_grad[to_clip,] <- (grad_clip * per_grad[to_clip,]) / grad_norm[to_clip]
+  }
+  
+  grad <- colSums(per_grad)
+  return(as.vector(grad))
+}
+
+
+
+# svm accuracy
+svm_test <- function(w, X, y){
+  
+  pred <- X%*%w
+  sign <- y * pred
+  cnt <- sum(sign > 0)
+  
+  return(cnt/length(y))
+}
+```
+
+
+\newpage
+
+## Differential privacy parameters 
+
+```{r}
+# DP parameters
+dp_to_zcdp <- function(eps, delta){
+  
+  eq_eps <- function(rho){
+    if (rho <= 0){
+      rho -eps
+    } else {
+    rho + 2.0 * sqrt(rho * log(1.0/delta)) - eps
+    }
+  }
+  
+  rho <- uniroot(eq_eps, interval = c(-1, 1))$root
+  return(rho)
+}
+
+
+
+compute_sigma <- function(eps, delta, sens){
+  sigma = sens / eps
+  sigma = sigma *sqrt(2 * log(1.25 / delta))
+  return(sigma)
+}
+
+
+
+compute_epsilon <- function(rho){
+  return(sqrt(2 * rho))
+}
+```
+
+
+\newpage
+
+## DP-AGD
+
+```{r}
+# NoisyMax (NoisyMin) algorithm
+noisy_max <- function(scores, lambda, bmin = F){
+  
+  noises <- rexp(length(scores), rate = 1/lambda)
+  # NoisyMin
+  if (bmin){
+    scores <- scores * (-1)
+    noises <- noises * (-1)
+  }
+  
+  scores <- scores + noises
+  return(which.max(scores))
+}
+
+
+
+# Gradient Averaging algorithm
+grad_avg <- function(rho_old, rho_H, 
+                     true_grad, noisy_grad, grad_clip){
+  
+  sigma <- grad_clip / sqrt(2 * (rho_H - rho_old))
+  
+  g_2 <- true_grad + sigma * rnorm(length(true_grad))
+  
+  beta <- rho_old / rho_H
+  s_tilde <- beta * noisy_grad + (1 - beta) * g_2
+  
+  return(s_tilde)
+}
+```
+
+
+\newpage
+
+```{r}
+# adaptive gradient descent 
+
+agd <- function(X, y, rho, 
+                eps_total=0.6, 
+                delta=1e-8, 
+                grad_func=log_grad, 
+                loss_func=log_loss, 
+                test_func=log_test,
+                obj_clip=-1, grad_clip=-1,
+                exp_dec=1.0, 
+                gamma=0.1, 
+                splits=60){
+  
+  N <- length(y)
+  dim <- ncol(X)
+  
+  eps_nmax <- (eps_total * 0.5) / splits
+  sigma <- compute_sigma(eps_nmax, delta, grad_clip)
+  
+  rho_nmax <-  0.5 * (eps_nmax^2)
+  rho_ng <- (grad_clip^2) / (2.0 * sigma^2)
+
+  w <- rep(0, dim)
+  t <-  0
+  max_step_size <- 2
+  n_candidate <- 20
+  
+  # step_sizes_hist <- c()
+  w_hist <- a_hist <- l_hist <- c()
+  
+  while (rho > 0){
+    grad <-  grad_func(w, X, y, grad_clip)
+    l <- loss_func(w, X, y) / N
+    a <- test_func(w, X, y)
+    
+    sigma <-  grad_clip / sqrt(2.0 * rho_ng)
+    noisy_grad <-  grad + sigma * rnorm(dim)
+    noisy_unnorm <-  noisy_grad
+    noisy_grad <- noisy_grad / norm(noisy_grad, type = "2")
+    
+    rho <- rho - rho_ng
+    
+    idx <- 1
+    
+    while (idx == 1){
+      
+      step_sizes <- seq(0, max_step_size, length = n_candidate+1)
+      candidates <- list()
+      for (step_size in step_sizes){
+        candidates <- append(candidates, list(w - step_size * noisy_grad))
+      }
+      scores <- c()
+      for (theta in candidates){
+        scores <- c(scores, loss_func(theta, X, y, obj_clip))
+      }
+      scores[1] <- scores[1] * exp_dec
+      
+      lambda <- obj_clip/sqrt(2 * rho_nmax)
+      
+      idx <- noisy_max(scores, lambda, bmin=T)
+      
+      rho <- rho - rho_nmax
+      
+      if (rho < 0){
+        break
+      }
+      
+      if (idx > 1){
+        if (rho >= 0){
+          w <- candidates[[idx]]
+        }
+        rho <- rho - rho_ng
+      } else {
+        rho_old <-  rho_ng
+        rho_ng <- rho_ng * (1.0 + gamma)
+        
+        noisy_grad <- grad_avg(rho_old, rho_ng, grad, noisy_unnorm, grad_clip)
+        noisy_grad <- noisy_grad / norm(noisy_grad, type = "2")
+        rho <- rho - (rho_ng - rho_old)
+      }
+      
+    }
+  
+    # step_sizes_hist <- c(step_sizes_hist, step_sizes[idx])
+    w_hist <- c(w_hist, list(w))
+    a_hist <- c(a_hist, a)
+    l_hist <- c(l_hist, l)
+    t <- t + 1
+    
+  }
+  
+  w_hist <- matrix(unlist(w_hist), ncol = 2, byrow = T)
+  return(list("w" = w, "w_hist" = w_hist, "acc_hist" = a_hist, "loss_hist" = l_hist))
+}
+```
+
+
+\newpage
+
+```{r}
+# test the DP-AGD algorithm on the simulated set
+rho <-  dp_to_zcdp(eps=0.6, delta=1e-8)
+res <- agd(X, y, rho, eps_total=0.6, delta=1e-8, obj_clip=3, grad_clip=3)
+cat("estimated weights:", round(res$w, 3))
+
+par(mfrow=c(2,1), mai=c(.3, 1, .3, .7))
+plot(res$w_hist[,1], type = "l", ylab = "weight 1", main = "private gradient desecent")
+abline(h = 2, col = 4)
+plot(res$w_hist[,2], type = "l", ylab = "weight 2", xaxt='n')
+abline(h = 5, col = 4)
+plot(res$loss_hist, type = "l", ylab = "loss", main = "private gradient desecent")
+plot(res$acc_hist, type = "l", ylab = "accuracy", xaxt='n')
+```
